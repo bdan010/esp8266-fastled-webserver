@@ -26,8 +26,8 @@
 
 #include "sinric/Sinric.h"
 #include "sinric/SinricLight.h"
-const char* sinric_api_key = "b159c7d6-cb2e-4f81-8129-a3a10aa8c884";
-const char* sinricLightId = "5b84b5b0abec4d501b114529";
+const char* sinric_api_key = ""; #TODO
+const char* sinricLightId = ""; #TODO
 
 extern "C" {
 #include "user_interface.h"
