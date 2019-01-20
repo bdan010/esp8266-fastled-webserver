@@ -1,27 +1,33 @@
 /*
-   ESP8266 FastLED WebServer: https://github.com/jasoncoon/esp8266-fastled-webserver
-   Copyright (C) 2015-2018 Jason Coon
+ * ESP8266 + FastLED + IR Remote: https://github.com/jasoncoon/esp8266-fastled-webserver
+ * Copyright (C) 2015-2016 Jason Coon
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
-//#define FASTLED_ALLOW_INTERRUPTS 1
-//#define INTERRUPT_THRESHOLD 1
-#define FASTLED_INTERRUPT_RETRY_COUNT 0
+//
+//#define FASTLED_ESP8266_DMA //FOR FASTLED UPDATED LIBRARY
+//#include "fastled_DMA/FastLED.h" // using fastled updated library if not commented
 
 #include <FastLED.h>
-FASTLED_USING_NAMESPACE
+//#define FASTLED_INTERRUPT_RETRY_COUNT 0
+//FASTLED_USING_NAMESPACE
+
+#include "sinric/Sinric.h"
+#include "sinric/SinricLight.h"
+const char* sinric_api_key = "b159c7d6-cb2e-4f81-8129-a3a10aa8c884";
+const char* sinricLightId = "5b84b5b0abec4d501b114529";
 
 extern "C" {
 #include "user_interface.h"
@@ -31,52 +37,39 @@ extern "C" {
 //#include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
-//#include <WebSocketsServer.h>
+#include <WebSocketsServer.h>
 #include <FS.h>
 #include <EEPROM.h>
-//#include <IRremoteESP8266.h>
 #include "GradientPalettes.h"
 
 #define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
 #include "Field.h"
 
-//#define RECV_PIN D4
-//IRrecv irReceiver(RECV_PIN);
-
 //#include "Commands.h"
-
-ESP8266WebServer webServer(80);
-//WebSocketsServer webSocketsServer = WebSocketsServer(81);
-ESP8266HTTPUpdateServer httpUpdateServer;
-
-#include "FSBrowser.h"
-
-#define DATA_PIN      D5
-#define LED_TYPE      WS2811
-#define COLOR_ORDER   RGB
-#define NUM_LEDS      200
-
-#define MILLI_AMPS         2000 // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
-#define FRAMES_PER_SECOND  120  // here you can control the speed. With the Access Point / Web Server the animations run a bit slower.
 
 const bool apMode = false;
 
-#include "Secrets.h" // this file is intentionally not included in the sketch, so nobody accidentally commits their secret information.
-// create a Secrets.h file with the following:
+ESP8266WebServer webServer(80);
+WebSocketsServer webSocketsServer = WebSocketsServer(81);
+ESP8266HTTPUpdateServer httpUpdateServer;
 
-// AP mode password
-// const char WiFiAPPSK[] = "your-password";
+#include "WiFi.h"
 
-// Wi-Fi network to connect to (if not in AP mode)
-// char* ssid = "your-ssid";
-// char* password = "your-password";
+#include "FSBrowser.h"
 
+#define DATA_PIN      3
+#define LED_TYPE      WS2812B
+#define COLOR_ORDER   GRB
+#define NUM_LEDS      52
+
+#define MILLI_AMPS         2500     // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
+#define FRAMES_PER_SECOND  80 // here you can control the speed. With the Access Point / Web Server the animations run a bit slower.
 
 CRGB leds[NUM_LEDS];
 
 const uint8_t brightnessCount = 5;
-uint8_t brightnessMap[brightnessCount] = { 16, 32, 64, 128, 255 };
+uint8_t brightnessMap[brightnessCount] = { 16, 32, 64, 128, 180 }; //max brightness 180
 uint8_t brightnessIndex = 0;
 
 // ten seconds per color palette makes a good demo
@@ -185,8 +178,8 @@ const uint8_t patternCount = ARRAY_SIZE(patterns);
 
 typedef struct {
   CRGBPalette16 palette;
-  String name;
-} PaletteAndName;
+   String name;
+ } PaletteAndName;
 typedef PaletteAndName PaletteAndNameList[];
 
 const CRGBPalette16 palettes[] = {
@@ -208,16 +201,94 @@ const String paletteNames[paletteCount] = {
   "Cloud",
   "Lava",
   "Ocean",
-  "Forest",
+   "Forest",
   "Party",
-  "Heat",
-};
+   "Heat",
+ };
 
 #include "Fields.h"
 
-void setup() {
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+//TODO: implemnent sinric callbacks
+//full documentation from Amazon https://developer.amazon.com/docs/device-apis/alexa-colorcontroller.html
+void onPowerState(const String& deviceId, bool state) { 
+  Serial.printf("onPowerState(%s,%s) ", deviceId.c_str(), state?"true":"false");
+  if (state == true){
+    setPower(1);
+  }
+  else{
+    setPower(0);
+  }
+}
 
+//Alexa color interface - https://developer.amazon.com/docs/device-apis/alexa-colorcontroller.html
+//TODO Alexa might actually be using HSB not HSV, so keep an eye out
+void onSetColor(const String& deviceId, double hue, double sat, double val) {
+  Serial.printf("onSetColor(%s,%f,%f,%f)\r\n", deviceId.c_str(), hue, sat, val);
+  //converting to fastled
+  hue = 255 * (hue / 360); //hue sent as 0-360 from alexa; Need to convert to 0-255
+  sat = 255 * sat; //saturation sent as 0.00-1.00 from alexa, need to convert to 0-255
+  val = 255 * val; //value as 0.00-1.00 from alexa, need to convert to 0-255
+
+  CRGB tempRGB;
+  hsv2rgb_rainbow( CHSV( (int) hue, (int) sat, (int) val), tempRGB);
+  setSolidColor(tempRGB.r, tempRGB.g, tempRGB.b); 
+  sendString(String(tempRGB.r) + "," + String(tempRGB.g) + "," + String(tempRGB.b)); //using this to sync web
+}
+
+// Alexa brightness interface - https://developer.amazon.com/docs/device-apis/alexa-brightnesscontroller.html
+// bri is integer from 0-100 inclusive.
+void onSetBrightness(const String& deviceId, int bri) {
+  Serial.printf("onSetBrightness(%s,%d)\r\n", deviceId.c_str(), bri);
+  bri = (180 * bri) / 100; //sent as 0-100, converting to 0-180, with a max of 180, but could be 255 in theory
+  setBrightness( bri ); 
+}
+
+//this is only half-implemented, it only jumps up a notch, not the percentage as specified in API
+// bri is integer from -100 to 100, inclusive.  
+//TODO limit max brightness in other function
+void onAdjustBrightness(const String& deviceId, int bri) {
+  Serial.printf("onAdjustBrightness(%s,%d)\r\n", deviceId.c_str(), bri);
+  if (bri > 0 ) {
+    adjustBrightness(true); //this increments brightness
+  }
+  else {
+    adjustBrightness(false);
+  }
+}
+
+//These callbacks are for later
+void onDecColorTemperature(const String& deviceId)                          { Serial.printf("not implemented onDecColorTemperature(%s)\r\n", deviceId.c_str()); }
+void onIncColorTemperature(const String& deviceId)                          { Serial.printf("not implemented onIncColorTemperature(%s)\r\n", deviceId.c_str()); }
+void onSetColorTemperature(const String& deviceId, int color_temp)          { Serial.printf("not implemented onSetColorTemperature(%s,%d)\r\n", deviceId.c_str(), color_temp); }
+
+// Sinric setup
+void setupSinric() {
+  Serial.print("Connecting Sinric");
+  Sinric.begin(sinric_api_key);
+  while (!Sinric.isConnected()) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("sinric connected!");
+
+  // add a new Light 
+  SinricLight& myLight = Sinric.add<SinricLight>(sinricLightId);
+  // TODO - set the callbacks 
+  myLight.onPowerState(onPowerState);
+  myLight.onSetColor(onSetColor);
+  myLight.onSetBrightness(onSetBrightness);
+  myLight.onAdjustBrightness(onAdjustBrightness);
+  myLight.onIncColorTemperature(onIncColorTemperature);
+  myLight.onDecColorTemperature(onDecColorTemperature);
+  myLight.onSetColorTemperature(onSetColorTemperature);
+
+}
+
+
+
+
+void setup() {
+  //WiFi.setSleepMode(WIFI_NONE_SLEEP);
   Serial.begin(115200);
   delay(100);
   Serial.setDebugOutput(true);
@@ -236,7 +307,7 @@ void setup() {
 
   FastLED.setBrightness(brightness);
 
-  //  irReceiver.enableIRIn(); // Start the receiver
+//  irReceiver.enableIRIn(); // Start the receiver
 
   Serial.println();
   Serial.print( F("Heap: ") ); Serial.println(system_get_free_heap_size());
@@ -251,8 +322,6 @@ void setup() {
 
   SPIFFS.begin();
   {
-    Serial.println("SPIFFS contents:");
-
     Dir dir = SPIFFS.openDir("/");
     while (dir.next()) {
       String fileName = dir.fileName();
@@ -262,8 +331,7 @@ void setup() {
     Serial.printf("\n");
   }
 
-  //disabled due to https://github.com/jasoncoon/esp8266-fastled-webserver/issues/62
-  //initializeWiFi();
+  initializeWiFi();
 
   if (apMode)
   {
@@ -296,7 +364,18 @@ void setup() {
     if (String(WiFi.SSID()) != String(ssid)) {
       WiFi.begin(ssid, password);
     }
+
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    Serial.print("Connected! Open http://");
+    Serial.print(WiFi.localIP());
+    Serial.println(" in your browser");
   }
+
+  checkWiFi();
 
   httpUpdateServer.setup(&webServer);
 
@@ -348,7 +427,7 @@ void setup() {
   webServer.on("/twinkleSpeed", HTTP_POST, []() {
     String value = webServer.arg("value");
     twinkleSpeed = value.toInt();
-    if (twinkleSpeed < 0) twinkleSpeed = 0;
+    if(twinkleSpeed < 0) twinkleSpeed = 0;
     else if (twinkleSpeed > 8) twinkleSpeed = 8;
     broadcastInt("twinkleSpeed", twinkleSpeed);
     sendInt(twinkleSpeed);
@@ -357,7 +436,7 @@ void setup() {
   webServer.on("/twinkleDensity", HTTP_POST, []() {
     String value = webServer.arg("value");
     twinkleDensity = value.toInt();
-    if (twinkleDensity < 0) twinkleDensity = 0;
+    if(twinkleDensity < 0) twinkleDensity = 0;
     else if (twinkleDensity > 8) twinkleDensity = 8;
     broadcastInt("twinkleDensity", twinkleDensity);
     sendInt(twinkleDensity);
@@ -367,6 +446,9 @@ void setup() {
     String r = webServer.arg("r");
     String g = webServer.arg("g");
     String b = webServer.arg("b");
+    setPower(1); //ensure lights are on
+    sendInt(power);
+    
     setSolidColor(r.toInt(), g.toInt(), b.toInt());
     sendString(String(solidColor.r) + "," + String(solidColor.g) + "," + String(solidColor.b));
   });
@@ -434,11 +516,14 @@ void setup() {
   webServer.begin();
   Serial.println("HTTP web server started");
 
-  //  webSocketsServer.begin();
-  //  webSocketsServer.onEvent(webSocketEvent);
-  //  Serial.println("Web socket server started");
+  webSocketsServer.begin();
+  webSocketsServer.onEvent(webSocketEvent);
+  Serial.println("Web socket server started");
 
   autoPlayTimeout = millis() + (autoplayDuration * 1000);
+
+  setupSinric();
+
 }
 
 void sendInt(uint8_t value)
@@ -454,44 +539,36 @@ void sendString(String value)
 void broadcastInt(String name, uint8_t value)
 {
   String json = "{\"name\":\"" + name + "\",\"value\":" + String(value) + "}";
-  //  webSocketsServer.broadcastTXT(json);
+  webSocketsServer.broadcastTXT(json);
 }
 
 void broadcastString(String name, String value)
 {
   String json = "{\"name\":\"" + name + "\",\"value\":\"" + String(value) + "\"}";
-  //  webSocketsServer.broadcastTXT(json);
+  webSocketsServer.broadcastTXT(json);
 }
 
 void loop() {
-  // Add entropy to random number generator; we use a lot of it.
+  Sinric.handle();
+
+  // Add entropy to random number generator; we use a lot of it. 
   random16_add_entropy(random(65535));
 
-  //  dnsServer.processNextRequest();
-  //  webSocketsServer.loop();
+  EVERY_N_SECONDS(10) {
+    checkWiFi();
+  }
+
+//  dnsServer.processNextRequest();
+  webSocketsServer.loop();
   webServer.handleClient();
 
-  //  handleIrInput();
+//  handleIrInput();
 
   if (power == 0) {
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
     // FastLED.delay(15);
     return;
-  }
-
-  static bool hasConnected = false;
-  EVERY_N_SECONDS(1) {
-    if (WiFi.status() != WL_CONNECTED) {
-      //      Serial.printf("Connecting to %s\n", ssid);
-      hasConnected = false;
-    }
-    else if (!hasConnected) {
-      hasConnected = true;
-      Serial.print("Connected! Open http://");
-      Serial.print(WiFi.localIP());
-      Serial.println(" in your browser");
-    }
   }
 
   // EVERY_N_SECONDS(10) {
@@ -521,252 +598,46 @@ void loop() {
   FastLED.show();
 
   // insert a delay to keep the framerate modest
-  FastLED.delay(1000 / FRAMES_PER_SECOND);
+  // FastLED.delay(1000 / FRAMES_PER_SECOND);
 }
 
-//void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-//
-//  switch (type) {
-//    case WStype_DISCONNECTED:
-//      Serial.printf("[%u] Disconnected!\n", num);
-//      break;
-//
-//    case WStype_CONNECTED:
-//      {
-//        IPAddress ip = webSocketsServer.remoteIP(num);
-//        Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-//
-//        // send message to client
-//        // webSocketsServer.sendTXT(num, "Connected");
-//      }
-//      break;
-//
-//    case WStype_TEXT:
-//      Serial.printf("[%u] get Text: %s\n", num, payload);
-//
-//      // send message to client
-//      // webSocketsServer.sendTXT(num, "message here");
-//
-//      // send data to all connected clients
-//      // webSocketsServer.broadcastTXT("message here");
-//      break;
-//
-//    case WStype_BIN:
-//      Serial.printf("[%u] get binary length: %u\n", num, length);
-//      hexdump(payload, length);
-//
-//      // send message to client
-//      // webSocketsServer.sendBIN(num, payload, lenght);
-//      break;
-//  }
-//}
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
 
-//void handleIrInput()
-//{
-//  InputCommand command = readCommand();
-//
-//  if (command != InputCommand::None) {
-//    Serial.print("command: ");
-//    Serial.println((int) command);
-//  }
-//
-//  switch (command) {
-//    case InputCommand::Up: {
-//        adjustPattern(true);
-//        break;
-//      }
-//    case InputCommand::Down: {
-//        adjustPattern(false);
-//        break;
-//      }
-//    case InputCommand::Power: {
-//        setPower(power == 0 ? 1 : 0);
-//        break;
-//      }
-//    case InputCommand::BrightnessUp: {
-//        adjustBrightness(true);
-//        break;
-//      }
-//    case InputCommand::BrightnessDown: {
-//        adjustBrightness(false);
-//        break;
-//      }
-//    case InputCommand::PlayMode: { // toggle pause/play
-//        setAutoplay(!autoplay);
-//        break;
-//      }
-//
-//    // pattern buttons
-//
-//    case InputCommand::Pattern1: {
-//        setPattern(0);
-//        break;
-//      }
-//    case InputCommand::Pattern2: {
-//        setPattern(1);
-//        break;
-//      }
-//    case InputCommand::Pattern3: {
-//        setPattern(2);
-//        break;
-//      }
-//    case InputCommand::Pattern4: {
-//        setPattern(3);
-//        break;
-//      }
-//    case InputCommand::Pattern5: {
-//        setPattern(4);
-//        break;
-//      }
-//    case InputCommand::Pattern6: {
-//        setPattern(5);
-//        break;
-//      }
-//    case InputCommand::Pattern7: {
-//        setPattern(6);
-//        break;
-//      }
-//    case InputCommand::Pattern8: {
-//        setPattern(7);
-//        break;
-//      }
-//    case InputCommand::Pattern9: {
-//        setPattern(8);
-//        break;
-//      }
-//    case InputCommand::Pattern10: {
-//        setPattern(9);
-//        break;
-//      }
-//    case InputCommand::Pattern11: {
-//        setPattern(10);
-//        break;
-//      }
-//    case InputCommand::Pattern12: {
-//        setPattern(11);
-//        break;
-//      }
-//
-//    // custom color adjustment buttons
-//
-//    case InputCommand::RedUp: {
-//        solidColor.red += 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//    case InputCommand::RedDown: {
-//        solidColor.red -= 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//    case InputCommand::GreenUp: {
-//        solidColor.green += 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//    case InputCommand::GreenDown: {
-//        solidColor.green -= 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//    case InputCommand::BlueUp: {
-//        solidColor.blue += 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//    case InputCommand::BlueDown: {
-//        solidColor.blue -= 8;
-//        setSolidColor(solidColor);
-//        break;
-//      }
-//
-//    // color buttons
-//
-//    case InputCommand::Red: {
-//        setSolidColor(CRGB::Red);
-//        break;
-//      }
-//    case InputCommand::RedOrange: {
-//        setSolidColor(CRGB::OrangeRed);
-//        break;
-//      }
-//    case InputCommand::Orange: {
-//        setSolidColor(CRGB::Orange);
-//        break;
-//      }
-//    case InputCommand::YellowOrange: {
-//        setSolidColor(CRGB::Goldenrod);
-//        break;
-//      }
-//    case InputCommand::Yellow: {
-//        setSolidColor(CRGB::Yellow);
-//        break;
-//      }
-//
-//    case InputCommand::Green: {
-//        setSolidColor(CRGB::Green);
-//        break;
-//      }
-//    case InputCommand::Lime: {
-//        setSolidColor(CRGB::Lime);
-//        break;
-//      }
-//    case InputCommand::Aqua: {
-//        setSolidColor(CRGB::Aqua);
-//        break;
-//      }
-//    case InputCommand::Teal: {
-//        setSolidColor(CRGB::Teal);
-//        break;
-//      }
-//    case InputCommand::Navy: {
-//        setSolidColor(CRGB::Navy);
-//        break;
-//      }
-//
-//    case InputCommand::Blue: {
-//        setSolidColor(CRGB::Blue);
-//        break;
-//      }
-//    case InputCommand::RoyalBlue: {
-//        setSolidColor(CRGB::RoyalBlue);
-//        break;
-//      }
-//    case InputCommand::Purple: {
-//        setSolidColor(CRGB::Purple);
-//        break;
-//      }
-//    case InputCommand::Indigo: {
-//        setSolidColor(CRGB::Indigo);
-//        break;
-//      }
-//    case InputCommand::Magenta: {
-//        setSolidColor(CRGB::Magenta);
-//        break;
-//      }
-//
-//    case InputCommand::White: {
-//        setSolidColor(CRGB::White);
-//        break;
-//      }
-//    case InputCommand::Pink: {
-//        setSolidColor(CRGB::Pink);
-//        break;
-//      }
-//    case InputCommand::LightPink: {
-//        setSolidColor(CRGB::LightPink);
-//        break;
-//      }
-//    case InputCommand::BabyBlue: {
-//        setSolidColor(CRGB::CornflowerBlue);
-//        break;
-//      }
-//    case InputCommand::LightBlue: {
-//        setSolidColor(CRGB::LightBlue);
-//        break;
-//      }
-//  }
-//}
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocketsServer.remoteIP(num);
+        Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+
+        // send message to client
+        // webSocketsServer.sendTXT(num, "Connected");
+      }
+      break;
+
+    case WStype_TEXT:
+      Serial.printf("[%u] get Text: %s\n", num, payload);
+
+      // send message to client
+      // webSocketsServer.sendTXT(num, "message here");
+
+      // send data to all connected clients
+      // webSocketsServer.broadcastTXT("message here");
+      break;
+
+    case WStype_BIN:
+      Serial.printf("[%u] get binary length: %u\n", num, length);
+      hexdump(payload, length);
+
+      // send message to client
+      // webSocketsServer.sendBIN(num, payload, lenght);
+      break;
+  }
+}
+
 
 void loadSettings()
 {
@@ -813,7 +684,7 @@ void setPower(uint8_t value)
 }
 
 void setAutoplay(uint8_t value)
-{
+  {
   autoplay = value == 0 ? 0 : 1;
 
   EEPROM.write(6, autoplay);
@@ -892,8 +763,8 @@ void setPattern(uint8_t value)
 
 void setPatternName(String name)
 {
-  for (uint8_t i = 0; i < patternCount; i++) {
-    if (patterns[i].name == name) {
+  for(uint8_t i = 0; i < patternCount; i++) {
+    if(patterns[i].name == name) {
       setPattern(i);
       break;
     }
@@ -915,8 +786,8 @@ void setPalette(uint8_t value)
 
 void setPaletteName(String name)
 {
-  for (uint8_t i = 0; i < paletteCount; i++) {
-    if (paletteNames[i] == name) {
+  for(uint8_t i = 0; i < paletteCount; i++) {
+    if(paletteNames[i] == name) {
       setPalette(i);
       break;
     }
@@ -940,10 +811,11 @@ void adjustBrightness(bool up)
   broadcastInt("brightness", brightness);
 }
 
+//TODO set ma brightness, lowered from 255
 void setBrightness(uint8_t value)
 {
-  if (value > 255)
-    value = 255;
+  if (value > 180)
+    value = 180;
   else if (value < 0) value = 0;
 
   brightness = value;
@@ -1013,10 +885,10 @@ void sinelon()
   int pos = beatsin16(speed, 0, NUM_LEDS);
   static int prevpos = 0;
   CRGB color = ColorFromPalette(palettes[currentPaletteIndex], gHue, 255);
-  if ( pos < prevpos ) {
-    fill_solid( leds + pos, (prevpos - pos) + 1, color);
+  if( pos < prevpos ) {
+    fill_solid( leds+pos, (prevpos-pos)+1, color);
   } else {
-    fill_solid( leds + prevpos, (pos - prevpos) + 1, color);
+    fill_solid( leds+prevpos, (pos-prevpos)+1, color);
   }
   prevpos = pos;
 }
@@ -1121,7 +993,7 @@ void pride()
 
 void radialPaletteShift()
 {
-  for (uint16_t i = 0; i < NUM_LEDS; i++) {
+  for (uint8_t i = 0; i < NUM_LEDS; i++) {
     // leds[i] = ColorFromPalette( gCurrentPalette, gHue + sin8(i*16), brightness);
     leds[i] = ColorFromPalette(gCurrentPalette, i + gHue, 255, LINEARBLEND);
   }
@@ -1136,7 +1008,7 @@ void heatMap(CRGBPalette16 palette, bool up)
   random16_add_entropy(random(256));
 
   // Array of temperature readings at each simulation cell
-  static byte heat[NUM_LEDS];
+  static byte heat[256];
 
   byte colorindex;
 
